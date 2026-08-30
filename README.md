@@ -1,25 +1,17 @@
-# LiveHaptics — live system-audio haptics for the Steam Controller (2026)
+# LiveHaptics — live system audio → Steam Controller (2026) haptics
+Plays your PC audio through the controller's haptic motors, real time.
+No drivers, no Zadig, no USBIP — stock HID, coexists with Steam.
 
-Plays your **live Windows system audio** through the Steam Controller (2026)
-haptic motors, in real time. No driver installs, no WinUSB/Zadig, no USBIP —
-runs on the controller's **stock HID driver** and coexists with Steam.
+## Downloads (Releases → v1.2)
+- **Windows:** `livehaptics-windows-v1.2.zip` — unzip, run `LiveHapticsGUI.exe` (or CLI `LiveHaptics.exe`)
+- **Linux:** `livehaptics-linux-v1.2.zip` — follow `README-linux.txt` (`./build.sh`, `./build_gui.sh`)
 
-## How it works
-- WASAPI loopback captures the default playback device
-- Resamples to 8 kHz stereo µ-law (the controller's native Puck haptic format)
-- PCM-stream setup per Pixel1011's TritonLib (DISABLE/ENABLE actuators 2+5, mode Khz8_8Bit_ulaw)
-- Report 0x88 over hidapi, paced 3875 µs/packet (128 kbps)
-
-## Use
-1. Puck plugged in (or USB cable), controller on. Steam open or closed.
-2. Run `LiveHaptics.exe`.
-3. Press `y` when you feel the 1-second calibration buzz.
-4. Play anything. Enter quits.
-
-## Build (MSYS2 UCRT64)
-    pacman -S mingw-w64-ucrt-x86_64-gcc mingw-w64-ucrt-x86_64-hidapi mingw-w64-ucrt-x86_64-spdlog mingw-w64-ucrt-x86_64-fmt
-    g++ -O2 -std=gnu++23 haptics.cpp -o LiveHaptics.exe -lhidapi -lspdlog -lfmt -lole32 -luuid -lsetupapi
+## Modes
+| Mode | Windows | Linux |
+|---|---|---|
+| Wired USB (16-bit 8 kHz) | ✔ | ✔ |
+| Puck dongle (µ-law 8 kHz) | ✔ | ✔ (silent? `./LiveHapticsGUI --dev 0`) |
+| Bluetooth (µ-law 4 kHz) | ✔ | ⚠ experimental |
 
 ## Credits
-- Protocol reverse-engineering: **Pixel1011** (SteamHapticsPlayer / TritonLib), protocol data by **iczero**.
-- µ-law haptics pipeline concepts: **ga2mer** (sc2ds).
+Protocol: Pixel1011 (SteamHapticsPlayer/TritonLib) + iczero · Concepts: ga2mer · MIT
