@@ -4,6 +4,31 @@
 #include <windows.h>
 #include <mmdeviceapi.h>
 #include <audioclient.h>
+static const PROPERTYKEY PKEY_DevFriendly = { { 0xa45c254e, 0xdf1c, 0x4efd, { 0x80, 0x20, 0x67, 0xd1, 0x46, 0xa8, 0x50, 0xe0 } }, 14 };
+static void ListRenderDevices() {
+  CoInitializeEx(nullptr, COINIT_MULTITHREADED);
+  IMMDeviceEnumerator *pEnum = nullptr;
+  CoCreateInstance(CLSID_MMDeviceEnumerator, nullptr, CLSCTX_ALL, IID_IMMDeviceEnumerator, (void **)&pEnum);
+  if (!pEnum) return;
+  IMMDeviceCollection *pColl = nullptr;
+  pEnum->EnumAudioEndpoints(eRender, DEVICE_STATE_ACTIVE, &pColl);
+  UINT n = 0; if (pColl) pColl->GetCount(&n);
+  for (UINT i = 0; i < n; i++) {
+    IMMDevice *pD = nullptr; if (FAILED(pColl->Item(i, &pD))) continue;
+    IPropertyStore *pP = nullptr;
+    if (SUCCEEDED(pD->OpenPropertyStore(STGM_READ, &pP))) {
+      PROPVARIANT v{};
+      if (SUCCEEDED(pP->GetValue(PKEY_DevFriendly, &v)) && v.pwszVal) {
+        printf("[%u] %ls\n", i, v.pwszVal);
+        CoTaskMemFree(v.pwszVal);
+      }
+      pP->Release();
+    }
+    pD->Release();
+  }
+  if (pColl) pColl->Release();
+  pEnum->Release();
+}
 #include <ksmedia.h>
 #include <memory>
 #include <vector>
@@ -24,11 +49,39 @@ public:
     WAVEFORMATEX *fmt = nullptr;
     HRESULT hr = CoCreateInstance(CLSID_MMDeviceEnumerator, nullptr, CLSCTX_ALL,
                                   IID_IMMDeviceEnumerator, (void **)&en);
-    if (SUCCEEDED(hr)) hr = en->GetDefaultAudioEndpoint(eRender, eConsole, &dev);
+    dev = nullptr;
+    if (!g_device.empty()) {
+      IMMDeviceCollection *pColl = nullptr;
+      if (SUCCEEDED(en->EnumAudioEndpoints(eRender, DEVICE_STATE_ACTIVE, &pColl))) {
+        UINT count = 0; pColl->GetCount(&count);
+        for (UINT di = 0; di < count && !dev; di++) {
+          IMMDevice *pCur = nullptr;
+          if (FAILED(pColl->Item(di, &pCur))) continue;
+          IPropertyStore *pP = nullptr;
+          if (SUCCEEDED(pCur->OpenPropertyStore(STGM_READ, &pP))) {
+            PROPVARIANT v{};
+            if (SUCCEEDED(pP->GetValue(PKEY_DevFriendly, &v)) && v.pwszVal) {
+              std::wstring name = v.pwszVal;
+              for (auto &c : name) c = towupper(c);
+              std::wstring needle;
+              for (char c : g_device) needle += (wchar_t)toupper((unsigned char)c);
+              if (name.find(needle) != std::wstring::npos) dev = pCur;
+            }
+            CoTaskMemFree(v.pwszVal);
+            pP->Release();
+          }
+          if (!dev) pCur->Release();
+        }
+        pColl->Release();
+      }
+      if (!dev) printf("No device matching '%s' - using default\n", g_device.c_str());
+    }
+    if (!dev) { hr = en->GetDefaultAudioEndpoint(eRender, eConsole, &dev); }
+    else hr = S_OK;
     if (SUCCEEDED(hr)) hr = dev->Activate(IID_IAudioClient, CLSCTX_ALL, nullptr, (void **)&cl);
     if (SUCCEEDED(hr)) hr = cl->GetMixFormat(&fmt);
     if (SUCCEEDED(hr)) hr = cl->Initialize(AUDCLNT_SHAREMODE_SHARED,
-                            AUDCLNT_STREAMFLAGS_LOOPBACK, 300000, 0, fmt, nullptr);
+                            AUDCLNT_STREAMFLAGS_LOOPBACK, 10000, 0, fmt, nullptr);
     if (SUCCEEDED(hr)) hr = cl->GetService(IID_IAudioCaptureClient, (void **)&cap);
     if (FAILED(hr)) { spdlog::error("WASAPI setup failed: {:#x}", (unsigned)hr); return; }
     bool is_float = fmt->wFormatTag == WAVE_FORMAT_IEEE_FLOAT ||
@@ -38,7 +91,7 @@ public:
     uint32_t target = 48000;
     uint32_t pre = target / target;
     if (pre < 1) pre = 1;
-    sink_->decim = (int)(target / 8000);
+    sink_->decim = (int)(target / g_rate);
     if (sink_->decim < 1) sink_->decim = 1;
     sink_->filter_rl.init(250.0, target);
     sink_->filter_rr.init(250.0, target);
@@ -47,7 +100,7 @@ public:
     spdlog::info("WASAPI loopback haptics started: {} ch, {} Hz", ch, target);
     cl->Start();
     while (on) {
-      Sleep(5);
+      Sleep(2);
       UINT32 next = 0;
       cap->GetNextPacketSize(&next);
       while (next > 0) {
@@ -84,3 +137,4 @@ private:
   std::shared_ptr<MockAudioSink> sink_;
 };
 #endif
+using CaptureBackend = WasapiLoopbackCapture;
