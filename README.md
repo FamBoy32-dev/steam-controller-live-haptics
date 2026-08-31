@@ -1,17 +1,31 @@
-# LiveHaptics — live system audio → Steam Controller (2026) haptics
-Plays your PC audio through the controller's haptic motors, real time.
-No drivers, no Zadig, no USBIP — stock HID, coexists with Steam.
+# LiveHaptics v1.2 - Linux / Steam Deck
+Real-time audio -> haptics for Steam Controller (2026). Wired / Puck / Bluetooth.
+Dark Qt GUI + CLI. Run from Desktop mode.
 
-## Downloads (Releases → v1.2)
-- **Windows:** `livehaptics-windows-v1.2.zip` — unzip, run `LiveHapticsGUI.exe` (or CLI `LiveHaptics.exe`)
-- **Linux:** `livehaptics-linux-v1.2.zip` — follow `README-linux.txt` (`./build.sh`, `./build_gui.sh`)
+## Run (prebuilt)
+    chmod +x livehaptics LiveHapticsGUI   # only if the archive lost exec bits
+    ./LiveHapticsGUI                      # or ./livehaptics for CLI
 
-## Modes
-| Mode | Windows | Linux |
-|---|---|---|
-| Wired USB (16-bit 8 kHz) | ✔ | ✔ |
-| Puck dongle (µ-law 8 kHz) | ✔ | ✔ (silent? `./LiveHapticsGUI --dev 0`) |
-| Bluetooth (µ-law 4 kHz) | ✔ | ⚠ experimental |
+## What to install (only if something is missing)
+SteamOS already ships PipeWire/PulseAudio. The prebuilt GUI needs Qt5 + hidapi:
+    sudo pacman -S qt5-base hidapi
+To build from source:
+    sudo pacman -S base-devel qt5-base hidapi
+    ./build.sh        # core  -> ./livehaptics
+    ./build_gui.sh    # GUI   -> ./LiveHapticsGUI
 
-## Credits
-Protocol: Pixel1011 (SteamHapticsPlayer/TritonLib) + iczero · Concepts: ga2mer · MIT
+## Capture source
+The dropdown lists PulseAudio "*.monitor" sources; haptics follow the chosen
+output. Switching mid-stream restarts the core automatically.
+
+## Transports
+Wired 16-bit 8 kHz | Puck 8 kHz (4 kHz selectable) | Bluetooth 1 kHz (Linux).
+
+## First-run Puck
+If found but silent: ./livehaptics --pick  -> choose the <haptics> row.
+
+## Troubleshooting
+- "Permission denied" -> chmod +x (archives made on Windows lose exec bits).
+- Controller not found? Close Steam, replug the dongle, re-pair BT.
+- Pops on Puck? Wireless rate -> 4 kHz clean.
+- Nothing here needs sudo except the optional pacman installs.

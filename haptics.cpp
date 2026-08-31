@@ -1,3 +1,8 @@
+#ifdef _WIN32
+#ifndef usleep
+#define usleep(us) Sleep((DWORD)((us)/1000))
+#endif
+#endif
 #define _USE_MATH_DEFINES
 #include <cmath>
 #include <algorithm>
@@ -124,10 +129,12 @@ public:
         int32_t m = abs(xl) > abs(xr) ? abs(xl) : abs(xr);
         if (m > g_env) g_env = m; else g_env -= g_env / 256;
         double gt = g_gain;
-        if (g_env > 0 && (double)g_env * gt > 28000.0) gt = 28000.0 / g_env;
-        g_smooth += (gt - g_smooth) * 0.25;
-        int16_t sl = (int16_t)std::clamp((int32_t)(xl * g_smooth), -32768, 32767);
-        int16_t sr2 = (int16_t)std::clamp((int32_t)(xr * g_smooth), -32768, 32767);
+        if (g_env > 0 && (double)g_env * gt > 26000.0) gt = 26000.0 / g_env;
+        if (gt < g_smooth) g_smooth = gt; else g_smooth += (gt - g_smooth) * 0.02;
+        int32_t xl2 = (int32_t)(xl * g_smooth); if (xl2 > 26000) xl2 = 26000 + (xl2 - 26000) / 4; else if (xl2 < -26000) xl2 = -26000 + (xl2 + 26000) / 4;
+        int16_t sl = (int16_t)std::clamp(xl2, -32767, 32767);
+        int32_t xr2 = (int32_t)(xr * g_smooth); if (xr2 > 26000) xr2 = 26000 + (xr2 - 26000) / 4; else if (xr2 < -26000) xr2 = -26000 + (xr2 + 26000) / 4;
+        int16_t sr2 = (int16_t)std::clamp(xr2, -32767, 32767);
         if (abs((int)sl) > g_lvlL.load()) g_lvlL.store(abs((int)sl));
         if (abs((int)sr2) > g_lvlR.load()) g_lvlR.store(abs((int)sr2));
         if (g_bit16) {
@@ -141,7 +148,7 @@ public:
         if (temp_accumulator.size() >= (g_bit16 ? 60 : 62)) {
           std::lock_guard<std::mutex> lock(queue_mutex);
           queue.push(std::move(temp_accumulator));
-          while ((int)queue.size() > g_cap) queue.pop();
+          while ((int)queue.size() > (g_cap < 2 ? 2 : g_cap)) queue.pop();
           temp_accumulator.clear();
         }
       }
@@ -159,6 +166,36 @@ public:
 #include <windows.h>
 #endif
 std::atomic<bool> running{true};
+static void pcm_cleanup(int);
+static std::deque<std::array<uint8_t,64>> g_wrq;
+static std::mutex g_wrq_m;
+static double g_per_adj = 1.0;
+static long long g_depth_sum = 0, g_depth_n = 0;
+static int g_wfail = 0;
+static bool g_bt = false;
+#include <cstring>
+#ifdef _WIN32
+static std::string g_def_id;
+static std::string wasapi_default_id() {
+  std::string id;
+  IMMDeviceEnumerator *en = nullptr;
+  if (SUCCEEDED(CoCreateInstance(CLSID_MMDeviceEnumerator, nullptr, CLSCTX_ALL, IID_IMMDeviceEnumerator, (void**)&en)) && en) {
+    IMMDevice *dev = nullptr;
+    if (SUCCEEDED(en->GetDefaultAudioEndpoint(eRender, eConsole, &dev)) && dev) {
+      LPWSTR ws = nullptr;
+      if (SUCCEEDED(dev->GetId(&ws)) && ws) {
+        int n = WideCharToMultiByte(CP_UTF8, 0, ws, -1, nullptr, 0, nullptr, nullptr);
+        std::string t;
+        if (n > 0) { t.resize((size_t)n); WideCharToMultiByte(CP_UTF8, 0, ws, -1, &t[0], n, nullptr, nullptr); t.resize((size_t)n - 1); }
+        id = t; CoTaskMemFree(ws);
+      }
+      dev->Release();
+    }
+    en->Release();
+  }
+  return id;
+}
+#endif
 std::thread wasapi_thread;
 static std::vector<hid_device*> g_devs;
 
@@ -197,7 +234,21 @@ static hid_device *open_controller() {
     g_devs.push_back(d); g_pids.push_back(c.second); g_paths.push_back(c.first); g_ok.push_back(ok);
   }
   for (int p : g_pids) if (p == 0x1302) g_bit16 = true;
-    for (int p : g_pids) if (p == 0x1303 && !g_rate_set) { g_rate = 1000; printf("BT: 1kHz mode (32 reports/s)\n"); }
+  for (int p : g_pids) if (p == 0x1303) g_bt = true;
+    for (int p : g_pids) if (p == 0x1303 && !g_rate_set) {
+#ifdef _WIN32
+    g_rate = 4000; printf("BT: 4kHz mode (Windows native stack)\n");
+#else
+for (int p : g_pids) if (p == 0x1303 && !g_rate_set) {
+#ifdef _WIN32
+    g_rate = 4000; printf("BT: 4kHz mode (Windows native stack)\n");
+#else
+    g_rate = 1000; printf("BT: 1kHz mode (32 reports/s)\n");
+#endif
+  }
+#endif
+  }
+  // Puck: 8kHz hi-fi default; GUI selector / --rate 4000 = clean mode
     if (!g_gain_set) g_gain = g_bit16 ? 2.0 : (g_rate == 4000 ? 3.0 : (g_rate == 2000 ? 3.0 : (g_rate == 1000 ? 4.0 : 2.0)));  // per-mode loudness normalize
     printf("Found %zu candidate interface(s) [PID %04x] - %s\n", g_devs.size(), g_pids.empty() ? 0 : (unsigned)g_pids[0], g_bit16 ? "WIRED: 16-bit 8kHz" : (g_rate == 4000 ? "BT: u-law 4kHz" : (g_rate == 2000 ? "BT: u-law 2kHz" : (g_rate == 1000 ? "BT: u-law 1kHz" : "PUCK: 8-bit u-law 8kHz"))));
   return g_devs.empty() ? nullptr : g_devs[0];
@@ -245,15 +296,31 @@ static void cmd_poll() {
     while (fgets(line, sizeof line, f)) {
       if (sscanf(line, "gain %lf", &v) == 1) g_gain = v;
       else if (sscanf(line, "bass %lf", &v) == 1) g_bass = v;
+    else if (strncmp(line, "stop", 4) == 0) { remove("lh.cmd"); pcm_cleanup(0); }
       else if (sscanf(line, "cap %lf", &v) == 1) g_cap = (int)v;
     }
     fclose(f);
     remove("lh.cmd");
   }
 }
+#ifdef _WIN32
+static void dev_watch() {
+  CoInitializeEx(nullptr, COINIT_MULTITHREADED);
+  while (running.load()) {
+    Sleep(500);
+    std::string id = wasapi_default_id();
+    if (!id.empty() && !g_def_id.empty() && id != g_def_id) {
+      printf("default audio device changed - capture restart\n");
+      g_def_id = id; running = false;
+    }
+  }
+}
+#endif
 static void hotplug_watch() {
   while (running.load()) {
     Sleep(1000);
+    static long long ls = -1; long long cs = g_sent.load();
+    if (cs != ls) { ls = cs; continue; }
     int had = 0;
     for (int p : g_pids) had |= (p == 0x1302 ? 1 : p == 0x1304 ? 2 : p == 0x1303 ? 4 : 0);
     int now = 0; bool any = false;
@@ -294,6 +361,26 @@ static int16_t MuLawToLinear(uint8_t u) {
 #include "web_linux.hpp"
 #endif
 #include <csignal>
+#include <deque>
+#include <array>
+#include <cstring>
+static void write_thread_fn() {
+  while (true) {
+    std::array<uint8_t,64> r; bool have = false;
+    { std::lock_guard<std::mutex> lk(g_wrq_m);
+      if (!g_wrq.empty()) { r = g_wrq.front(); g_wrq.pop_front(); have = true; } }
+    if (have) {
+      int wr = 0;
+      for (auto *d : g_devs) wr = hid_write(d, r.data(), 64);
+      if (wr <= 0) { if (++g_wfail > 100) { printf("controller link dead - restart\n"); running = false; } }
+      else g_wfail = 0;
+    } else {
+      if (!running.load()) return;
+      Sleep(1);
+    }
+  }
+}
+
 static void pcm_cleanup(int) {
   uint8_t p = (uint8_t)(g_bit16 ? 0 : (g_rate == 8000 ? 8 : (g_rate == 4000 ? 9 : (g_rate == 2000 ? 10 : 11))));
   for (auto *d : g_devs) { send_pcm_mode(d, 0x01, 2, p); send_pcm_mode(d, 0x01, 5, p); }
@@ -365,6 +452,7 @@ int main(int argc, char **argv) {
 #endif
   setup_pcm_8k_ulaw();
   if (!g_pids.empty() && g_pids[0] == 0x1303 && g_cap < 64) g_cap = 64;
+  if (!g_pids.empty() && g_pids[0] == 0x1304 && g_cap < 24) g_cap = 24;
   int chosen = g_dev;
   if (chosen < 0) { FILE *f = fopen("livehaptics.cfg", "r"); if (f) { int v = -1, vp = 0; if (fscanf(f, "%d %d", &v, &vp) == 2 && v >= 0 && v < (int)g_devs.size() && (int)g_pids[v] == vp) chosen = v; fclose(f); } }
   if ((int)g_devs.size() > 1 && (g_pick || chosen < 0 || chosen >= (int)g_devs.size())) {
@@ -388,10 +476,18 @@ int main(int argc, char **argv) {
   sink->decim = 48000 / g_rate;
   signal(SIGTERM, pcm_cleanup); signal(SIGINT, pcm_cleanup);
   wasapi_thread = std::thread([sink]() { CaptureBackend c(sink); c.run(running); });
+#ifdef _WIN32
+  CoInitializeEx(nullptr, COINIT_MULTITHREADED);
+  g_def_id = wasapi_default_id();
+#endif
   std::thread([]() { ui_loop(); }).detach();
   std::thread([]() { cmd_poll(); }).detach();
   std::thread([]() { hotplug_watch(); }).detach();
   std::thread([]() { stat_write(); }).detach();
+  std::thread([]() { write_thread_fn(); }).detach();
+#ifdef _WIN32
+  std::thread([]() { dev_watch(); }).detach();
+#endif
 #ifndef _WIN32
   if (g_web) std::thread([]() { web_server(); }).detach();
 #endif
@@ -403,17 +499,32 @@ int main(int argc, char **argv) {
   while (running) {
     std::vector<uint8_t> pkt;
     static bool primed = false;
-    static int prime_target = 8, prime_floor = 0;
+    static int prime_target = 24, prime_floor = 0;
     if (!primed && !g_pids.empty() && g_pids[0] == 0x1303) { prime_target = 8; prime_floor = 2; }
     { std::lock_guard<std::mutex> lock(sink->queue_mutex);
       if (!primed && sink->queue.size() >= (size_t)prime_target) primed = true;
       if (primed) { if ((int)sink->queue.size() < qmin) qmin = (int)sink->queue.size();
+        g_depth_sum += (long long)sink->queue.size(); g_depth_n++;
         if ((int)sink->queue.size() > prime_floor && !sink->queue.empty()) { pkt = std::move(sink->queue.front()); sink->queue.pop(); } } }
+    if (pkt.empty() && primed) {
+      auto dl = std::chrono::steady_clock::now() + std::chrono::milliseconds(3);
+      while (pkt.empty() && std::chrono::steady_clock::now() < dl) {
+        std::lock_guard<std::mutex> lock(sink->queue_mutex);
+        if (!sink->queue.empty()) { pkt = std::move(sink->queue.front()); sink->queue.pop(); }
+      }
+    }
+    if (pkt.empty() && primed) {
+      for (int w = 0; w < 3 && pkt.empty(); w++) {
+        Sleep(1);
+        std::lock_guard<std::mutex> lock(sink->queue_mutex);
+        if (!sink->queue.empty()) { pkt = std::move(sink->queue.front()); sink->queue.pop(); }
+      }
+    }
       static int16_t fl = 0, fr = 0;
       static bool was_gap = false;
       if (pkt.empty()) {
         if (g_bit16) {
-          for (int i = 0; i < 15; i++) { fl -= fl / 4; fr -= fr / 4;
+          for (int i = 0; i < 31; i++) { fl -= fl / 32; fr -= fr / 32;
             pkt.push_back(fl & 0xFF); pkt.push_back((fl >> 8) & 0xFF);
             pkt.push_back(fr & 0xFF); pkt.push_back((fr >> 8) & 0xFF); }
         } else {
@@ -456,15 +567,23 @@ int main(int argc, char **argv) {
         report[1] = (uint8_t)(pkt.size() / 2);
         for (size_t i = 0; i < pkt.size()/2 && i < 31; i++) { report[2+i] = pkt[i*2]; report[33+i] = pkt[i*2+1]; }
       }
-      int wr = 0;
-      { auto t0 = std::chrono::steady_clock::now();
-      for (auto *d : g_devs) wr = hid_write(d, report, sizeof(report));
-      long long us = std::chrono::duration_cast<std::chrono::microseconds>(std::chrono::steady_clock::now() - t0).count();
-      if (us > wr_max) wr_max = us; }
-      if (wr <= 0 && err_count++ < 5) printf("hid_write failed: %d\n", wr);
-      if (++sent % 500 == 0) { printf("sent %d packets (max write %lld us, qmin=%d)\n", sent, wr_max, qmin); wr_max = 0; qmin = 999; }
+      { std::unique_lock<std::mutex> lk(g_wrq_m);
+        if (g_wrq.size() > 6) {
+          if (g_bt) { auto dl = std::chrono::steady_clock::now() + std::chrono::milliseconds(20);
+            while (g_wrq.size() > 6 && std::chrono::steady_clock::now() < dl) { lk.unlock(); Sleep(1); lk.lock(); } }
+          if (g_wrq.size() > 6) g_wrq.pop_front();
+        }
+        std::array<uint8_t,64> rr; memcpy(rr.data(), report, 64);
+        g_wrq.push_back(rr); }
+if (++sent % 500 == 0) {
+        double avg = g_depth_n ? (double)g_depth_sum / g_depth_n : 8.0;
+        g_per_adj -= (avg - 8.0) * 0.0004;
+        if (g_per_adj < 0.994) g_per_adj = 0.994;
+        if (g_per_adj > 1.006) g_per_adj = 1.006;
+        printf("sent %d packets (qmin=%d, avg=%.1f, adj=%.4f)\n", sent, qmin, avg, g_per_adj);
+        wr_max = 0; qmin = 999; g_depth_sum = 0; g_depth_n = 0; }
       g_sent.store(g_sent.load() + 1);
-      next_send += std::chrono::microseconds(g_bit16 ? 1875 : 31000000 / g_rate);
+next_send += std::chrono::microseconds((long long)((g_bit16 ? 1875.0 : 31000000.0 / g_rate) * g_per_adj));
       {
         auto nowr = std::chrono::steady_clock::now();
         long long per = g_bit16 ? 1875 : 31000000 / g_rate;
@@ -476,6 +595,6 @@ int main(int argc, char **argv) {
   }
   if (wasapi_thread.joinable()) wasapi_thread.join();
   for (auto *d : g_devs) hid_close(d);
-  hid_exit();
+  pcm_cleanup(0);
   return 0;
 }
